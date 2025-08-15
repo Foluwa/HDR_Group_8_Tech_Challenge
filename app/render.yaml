@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: c34-lung-app
+    runtime: python
+    plan: free
+    buildCommand: |
+      pip install -r requirements.txt
+      echo "Downloading dataset from $DATA_URL"
+      curl -fL "$DATA_URL" -o c34_merged.csv
+    startCommand: streamlit run app.py --server.port $PORT --server.address 0.0.0.0
+    envVars:
+      - key: DATA_URL
+        sync: false   
