@@ -3,3 +3,4 @@ data/raw/*.csv
 *.csv
 .venv
 c34_merged.csv
+.DS_Store
