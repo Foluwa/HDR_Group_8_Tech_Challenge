@@ -3,6 +3,7 @@ services:
     name: c34-lung-app
     runtime: python
     plan: free
+    rootDir: app
     buildCommand: |
       pip install -r requirements.txt
       echo "Downloading dataset from $DATA_URL"
