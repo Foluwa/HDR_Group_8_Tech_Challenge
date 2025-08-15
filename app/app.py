@@ -2,6 +2,7 @@
 # Streamlit dashboard for Simulacrum Lung Cancer (C34)
 
 import os
+import time
 import numpy as np
 import pandas as pd
 import plotly.express as px
@@ -11,28 +12,42 @@ from lifelines import KaplanMeierFitter
 
 st.set_page_config(page_title="C34 Simulacrum Explorer", page_icon="🫁", layout="wide")
 
-# ------------------------ Branding / Logo ------------------------
-# Put a logo file next to app.py (e.g., logo.png) or set an env var:
-#   APP_LOGO_PATH=/content/mylogo.png
-# LOGO_PATH = os.environ.get("APP_LOGO_PATH", "logo.png")
-LOGO_PATH = "./assets/logo.png"
+# ───────────────────────── Sidebar branding (logo at very top, sticky) ─────────────────────────
+LOGO_PATH = "./assets/logo.png"     
+BRAND_CAPTION="Health Data Research UK"
 
-def show_header():
-    left, right = st.columns([1, 6], vertical_alignment="center")
-    with left:
-        if os.path.exists(LOGO_PATH):
-            st.image(LOGO_PATH, caption=None, use_container_width=True)
-        else:
-            st.markdown("<div style='height:1rem'></div>", unsafe_allow_html=True)
-    with right:
-        st.title("🫁 Simulacrum C34 (Lung) – Interactive Explorer")
-        st.caption("Patient-centric master table (synthetic). Use filters on the left to subset in real time.")
+def add_sidebar_branding(logo_path: str = LOGO_PATH, caption: str | None = BRAND_CAPTION):
+    # Keep branding pinned to top of the sidebar
+    st.markdown("""
+        <style>
+            [data-testid="stSidebar"] .sidebar-branding {
+                position: sticky; top: 0; z-index: 100;
+                background: var(--secondary-background-color);
+                padding: 0.5rem 0 0.5rem 0; margin-bottom: 0.5rem;
+            }
+            [data-testid="stSidebar"] .block-container { padding-top: 0.4rem; }
+        </style>
+    """, unsafe_allow_html=True)
+    with st.sidebar:
+        st.markdown('<div class="sidebar-branding">', unsafe_allow_html=True)
+        if os.path.exists(logo_path):
+            st.image(logo_path, use_container_width=True)
+        if caption:
+            st.caption(caption)
+        st.markdown('</div>', unsafe_allow_html=True)
+        st.markdown("---")
 
-# ------------------------ Data utils ------------------------
+# ───────────────────────── Data utils ─────────────────────────
 @st.cache_data(show_spinner=False)
 def load_csv(path_or_buffer):
-    """Load CSV and coerce common date columns to datetime."""
-    df = pd.read_csv(path_or_buffer)
+    """
+    Load CSV safely:
+      - Read all columns as string to avoid DtypeWarning (mixed types).
+      - Parse common date columns.
+      - Coerce a few known numeric columns afterward.
+    """
+    df = pd.read_csv(path_or_buffer, dtype=str, low_memory=False)
+
     date_cols = [
         "DIAGNOSISDATEBEST", "VITALSTATUSDATE",
         "START_DATE_OF_REGIMEN", "DATE_DECISION_TO_TREAT",
@@ -42,16 +57,23 @@ def load_csv(path_or_buffer):
     for c in date_cols:
         if c in df.columns:
             df[c] = pd.to_datetime(df[c], errors="coerce")
+
+    num_cols = [
+        "AGE", "HEIGHT_AT_START_OF_REGIMEN", "WEIGHT_AT_START_OF_REGIMEN",
+        "RTPRESCRIBEDDOSE", "RTPRESCRIBEDFRACTIONS", "RTACTUALDOSE",
+        "RTACTUALFRACTIONS", "RADIOTHERAPYBEAMENERGY", "num_genes_tested"
+    ]
+    for c in num_cols:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+
     return df
 
 def ensure_fields(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Recompute survival fields and create fallbacks so the app is robust
-    even if the CSV lacks some columns.
-    """
+    """Create/repair derived fields so charts never crash."""
     d = df.copy()
 
-    # Stage group: prefer descriptive label, fall back to STAGE_BEST → "Stage X"
+    # Stage group
     if "Stage_Group" not in d.columns:
         if "stage_label" in d.columns:
             d["Stage_Group"] = d["stage_label"].fillna(
@@ -92,12 +114,10 @@ def ensure_fields(df: pd.DataFrame) -> pd.DataFrame:
         else:
             d["received_rt"] = False
 
-    # Age groups
+    # Age group
     if "AGE" in d.columns:
-        d["age_group"] = pd.cut(
-            d["AGE"], bins=[0, 64, 74, 120],
-            labels=["<65", "65-74", "75+"], include_lowest=True
-        )
+        d["age_group"] = pd.cut(d["AGE"], bins=[0, 64, 74, 120],
+                                labels=["<65", "65-74", "75+"], include_lowest=True)
     else:
         d["age_group"] = "Unknown"
 
@@ -108,16 +128,16 @@ def ensure_fields(df: pd.DataFrame) -> pd.DataFrame:
 
     return d
 
-# ------------------------ KM helpers ------------------------
+# ───────────────────────── KM helpers ─────────────────────────
 def _km_mask(df: pd.DataFrame) -> pd.Series:
-    """Valid KM rows: finite, non-negative durations and non-null event flags."""
+    """Valid KM rows: finite, non-negative durations & non-null event flags."""
     if not {"followup_days", "event_observed"}.issubset(df.columns):
         return pd.Series(False, index=df.index)
     durations = pd.to_numeric(df["followup_days"], errors="coerce")
     events = pd.to_numeric(df["event_observed"], errors="coerce")
     return durations.notna() & events.notna() & (durations >= 0)
 
-# ------------------------ UI helpers ------------------------
+# ───────────────────────── UI helpers ─────────────────────────
 def kpi_tiles(df: pd.DataFrame):
     n_pat = df["PATIENTID"].nunique() if "PATIENTID" in df.columns else len(df)
     med_age = float(df["AGE"].median()) if "AGE" in df.columns else np.nan
@@ -155,8 +175,7 @@ def stacked_bar(df, x, y, title):
     if x not in df.columns or y not in df.columns:
         st.info(f"Need columns '{x}' and '{y}'")
         return
-    tbl = (df[[x, y]].fillna("Unknown")
-           .groupby([x, y]).size().reset_index(name="count"))
+    tbl = (df[[x, y]].fillna("Unknown").groupby([x, y]).size().reset_index(name="count"))
     fig = px.bar(tbl, x=x, y="count", color=y, barmode="stack", title=title)
     st.plotly_chart(fig, use_container_width=True)
 
@@ -176,28 +195,22 @@ def plot_km(df, group_col=None, title="Kaplan–Meier survival"):
                 continue
             kmf.fit(grp.loc[m, "followup_days"], grp.loc[m, "event_observed"], label=str(name))
             sf = kmf.survival_function_.reset_index()
-            fig.add_trace(go.Scatter(x=sf["timeline"], y=sf[kmf._label],
-                                     mode="lines", name=str(name)))
+            fig.add_trace(go.Scatter(x=sf["timeline"], y=sf[kmf._label], mode="lines", name=str(name)))
     else:
         kmf.fit(df.loc[mask_all, "followup_days"], df.loc[mask_all, "event_observed"], label="All")
         sf = kmf.survival_function_.reset_index()
-        fig.add_trace(go.Scatter(x=sf["timeline"], y=sf[kmf._label],
-                                 mode="lines", name="All"))
+        fig.add_trace(go.Scatter(x=sf["timeline"], y=sf[kmf._label], mode="lines", name="All"))
 
-    fig.update_layout(title=title, xaxis_title="Days since diagnosis",
-                      yaxis_title="Survival probability")
+    fig.update_layout(title=title, xaxis_title="Days since diagnosis", yaxis_title="Survival probability")
     st.plotly_chart(fig, use_container_width=True)
 
-def corr_heatmap(df, height=900, width=1400):
-    """
-    Bigger correlation heatmap.
-    - Default height=900, width=1400 (you can tweak in the call).
-    """
+def corr_heatmap(df, height=1100, width=1800):
+    """Large correlation heatmap."""
     drop_ids = [c for c in ["PATIENTID", "LINKNUMBER", "LINK_NUMBER",
                             "MERGED_REGIMEN_ID", "PRESCRIPTIONID",
                             "RADIOTHERAPYEPISODEID"] if c in df.columns]
     num = df.drop(columns=drop_ids, errors="ignore").select_dtypes(include=np.number)
-    num = num.loc[:, num.nunique() >= 2]  # drop constants
+    num = num.loc[:, num.nunique() >= 2]
     if num.shape[1] < 2:
         st.info("Not enough numeric columns with variance for correlation.")
         return
@@ -206,27 +219,41 @@ def corr_heatmap(df, height=900, width=1400):
         corr, text_auto=".2f", color_continuous_scale="RdBu", zmin=-1, zmax=1,
         title="Correlation heatmap (variance-filtered)", height=height, width=width
     )
-    # Use provided width/height → set use_container_width=False
     st.plotly_chart(fig, use_container_width=False)
 
-# ------------------------ Load data with success banner ------------------------
+# ───────────────────────── Sidebar (logo first), then data loader ─────────────────────────
+add_sidebar_branding()  # logo at the very top of the sidebar
+
 st.sidebar.caption("Upload merged CSV (c34_merged.csv) or place it next to app.py.")
 upl = st.sidebar.file_uploader("Upload CSV", type=["csv"])
 default_path = "c34_merged.csv"
 
+def _flash_success(msg: str):
+    try:
+        st.toast(msg, icon="✅")  # auto-disappears on recent Streamlit
+    except Exception:
+        ph = st.empty()
+        ph.success(msg)
+        time.sleep(3)
+        ph.empty()
+
 if upl is not None:
     df_raw = load_csv(upl)
-    st.success(f"✅ Loaded uploaded file with {len(df_raw):,} rows.")
+    _flash_success(f"Loaded uploaded file with {len(df_raw):,} rows.")
 elif os.path.exists(default_path):
     df_raw = load_csv(default_path)
-    st.success(f"✅ Loaded {default_path} with {len(df_raw):,} rows.")
+    _flash_success(f"Loaded {default_path} with {len(df_raw):,} rows.")
 else:
     st.error("❌ No CSV found. Upload in the sidebar or place ./c34_merged.csv next to app.py.")
     st.stop()
 
 df = ensure_fields(df_raw)
 
-# ------------------------ Sidebar filters ------------------------
+# ───────────────────────── Main header ─────────────────────────
+st.title("🫁 Simulacrum C34 (Lung) – Interactive Explorer")
+st.caption("Patient-centric master table (synthetic). Use filters on the left to subset in real time.")
+
+# ───────────────────────── Sidebar filters ─────────────────────────
 with st.sidebar:
     st.header("Filters")
 
@@ -260,10 +287,7 @@ with st.sidebar:
     if q and "PATIENTID" in df.columns:
         df = df[df["PATIENTID"].astype(str).str.contains(q, na=False)]
 
-# ------------------------ Layout ------------------------
-show_header()
-
-# KPIs
+# ───────────────────────── KPI + Tabs ─────────────────────────
 kpi_tiles(df)
 st.divider()
 
@@ -319,8 +343,7 @@ with tab4:
         stacked_bar(df, "gender_label", "received_sact", "SACT uptake by gender")
 
 with tab5:
-    # Bigger heatmap by default (height=900, width=1400); adjust if you want
-    corr_heatmap(df, height=900, width=1400)
+    corr_heatmap(df, height=1100, width=1800)
     miss = df.isna().mean().sort_values(ascending=False)
     miss = miss[miss > 0]
     if not miss.empty:
